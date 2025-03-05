@@ -4,11 +4,85 @@ const cors = require('cors');
 const multer = require('multer');
 const axios = require('axios');
 const FormData = require('form-data');
+const swaggerJsdoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
 
 const app = express();
 
 // Enable CORS
 app.use(cors());
+
+// Swagger definition
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'Face Analysis Gateway API',
+      version: '1.0.0',
+      description: 'API Gateway for Face Analysis Services including Recognition, Attention Detection, and Face Localization',
+      contact: {
+        name: 'API Support'
+      }
+    },
+    servers: [
+      {
+        url: 'http://localhost:80',
+        description: 'Local Development'
+      }
+    ],
+    components: {
+      schemas: {
+        Error: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+            message: { type: 'string' },
+            details: { type: 'string' }
+          }
+        },
+        ProcessFrameResponse: {
+          type: 'object',
+          properties: {
+            lecture_id: { type: 'string' },
+            timestamp: { type: 'string', format: 'date-time' },
+            total_faces: { type: 'integer' },
+            faces: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  person_id: { type: 'string' },
+                  recognition_status: { type: 'string', enum: ['new', 'found'] },
+                  attention_status: { type: 'string', enum: ['focused', 'unfocused'] },
+                  confidence: { type: 'number', format: 'float' }
+                }
+              }
+            },
+            summary: {
+              type: 'object',
+              properties: {
+                new_faces: { type: 'integer' },
+                known_faces: { type: 'integer' },
+                focused_faces: { type: 'integer' },
+                unfocused_faces: { type: 'integer' }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  apis: ['./app.js']
+};
+
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+
+// Serve Swagger documentation
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.get('/api-docs.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
 
 // Configure multer for memory storage
 const upload = multer({ 
@@ -83,7 +157,47 @@ async function processFace(faceImage, lectureId) {
   }
 }
 
-// Main processing route
+/**
+ * @swagger
+ * /api/process-frame:
+ *   post:
+ *     summary: Process a frame from a lecture
+ *     description: Analyzes a frame to detect faces, recognize people, and determine attention status
+ *     tags: [Frame Processing]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               image:
+ *                 type: string
+ *                 format: binary
+ *                 description: The frame image to process
+ *               lectureId:
+ *                 type: string
+ *                 description: Unique identifier for the lecture session
+ *     responses:
+ *       200:
+ *         description: Frame successfully processed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ProcessFrameResponse'
+ *       400:
+ *         description: Invalid input
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 app.post('/api/process-frame', upload.single('image'), async (req, res) => {
   try {
     const lectureId = req.body.lectureId;
@@ -152,7 +266,28 @@ const errorHandler = (err, req, res, next) => {
   });
 };
 
-// Health check endpoint
+/**
+ * @swagger
+ * /health:
+ *   get:
+ *     summary: Health check endpoint
+ *     description: Check if the gateway service is running
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: ok
+ *                 message:
+ *                   type: string
+ *                   example: Gateway is running
+ */
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Gateway is running' });
 });
