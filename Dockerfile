@@ -6,14 +6,18 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (using npm install instead of npm ci)
+RUN if [ -f package-lock.json ]; then \
+      npm ci; \
+    else \
+      npm install; \
+    fi
 
 # Copy application code
 COPY . .
 
 # Stage 2: Setup Nginx with Node.js
-FROM nginx:stable-alpine
+FROM docker.io/nginx:stable-alpine
 
 # Install Node.js in Nginx image
 RUN apk add --update nodejs npm
@@ -30,5 +34,11 @@ COPY --from=builder /app .
 # Expose port
 EXPOSE 80
 
-# Start Nginx and Node.js application
-CMD nginx && npm start 
+# Create a start script
+RUN echo '#!/bin/sh' > /start.sh && \
+    echo 'nginx' >> /start.sh && \
+    echo 'cd /app && npm start' >> /start.sh && \
+    chmod +x /start.sh
+
+# Start both Nginx and Node.js
+CMD ["/start.sh"] 
