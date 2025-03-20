@@ -44,13 +44,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add the middleware to the application
-app.add_middleware(RequestLoggingMiddleware)
 
 # Service configuration using environment variables
 SERVICES = {
     "RECOGNITION": {
-        "url": os.getenv("LOCALIZATION_URL", "http://localization:23122"),
+        "url": os.getenv("RECOGNITION_URL", "http://recognition:23123"),
+    },
+    "LOCALIZATION": {
+        "url": os.getenv("LOCALIZATION_URL", "http://localhost:23120"),  # Updated default URL
+    },
+    "ATTENTION": {
+        "url": os.getenv("ATTENTION_URL", "http://attention:23125"),
     },
     "HANDRAISING": {
         "url": os.getenv("HANDRAISING_URL", "http://handraising:23124"),
@@ -112,83 +116,128 @@ def is_valid_iso_string(timestamp_str: str) -> bool:
 # Process single face with all services
 async def process_face(face_image: str, bounding_box: dict, lecture_id: str, timestamp: str) -> dict:
     try:
-        async with httpx.AsyncClient() as client:
+        # Remove file writing which could cause permission issues
+        logger.info(f"Processing face with bounding box: {bounding_box}")
+        
+        # Create BytesIO object only once
+        try:
+            decoded_image = base64.b64decode(face_image)
+            logger.info(f"Successfully decoded base64 image of length: {len(decoded_image)}")
+        except Exception as e:
+            logger.error(f"Base64 decoding error: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image: {str(e)}")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
             # Step 1: Recognition
-            recognition_form = {
-                "image": (
-                    "face.jpg", 
-                    base64.b64decode(face_image), 
-                    "image/jpeg"
+            try:
+                recognition_response = await client.post(
+                    f"{SERVICES['RECOGNITION']['url']}/identify",
+                    files={"image": ("face.jpg", io.BytesIO(decoded_image), "image/jpeg")}
                 )
-            }
-            recognition_response = await client.post(
-                f"{SERVICES['RECOGNITION']['url']}/identify",
-                files=recognition_form
-            )
-            if recognition_response.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Recognition service error: {recognition_response.text}")
-            
-            recognition_data = recognition_response.json()
+                logger.info(f"Recognition service response status: {recognition_response.status_code}")
+                
+                if recognition_response.status_code != 200:
+                    logger.error(f"Recognition service error: {recognition_response.text}")
+                    raise HTTPException(status_code=502, detail=f"Recognition service error: {recognition_response.text}")
+                
+                recognition_data = recognition_response.json()
+                logger.info(f"Recognition response: {recognition_data}")
+            except httpx.RequestError as e:
+                logger.error(f"Recognition request failed: {str(e)}")
+                raise HTTPException(status_code=503, detail=f"Recognition service unavailable: {str(e)}")
+            except Exception as e:
+                logger.error(f"Recognition error: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Recognition processing error: {str(e)}")
             
             # Step 2: Attention Detection
-            attention_form = {
-                "image": (
-                    "face.jpg", 
-                    base64.b64decode(face_image), 
-                    "image/jpeg"
-                ),
-                "face_id": (None, recognition_data["person_id"]),
-                "lecture_id": (None, lecture_id),
-                "timestamp": (None, timestamp)
-            }
-            attention_response = await client.post(
-                f"{SERVICES['ATTENTION']['url']}/detect-face-attention",
-                files=attention_form
-            )
-            if attention_response.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Attention service error: {attention_response.text}")
-            
-            attention_data = attention_response.json()
+            # Step 2: Attention Detection
+            try:
+                attention_form = {
+                    "file": ("face.jpg", io.BytesIO(decoded_image), "image/jpeg"),
+                    "face_id": (None, str(recognition_data["person_id"])),  # Use (None, value) for string fields
+                    "lecture_id": (None, str(lecture_id)),
+                    "timestamp": (None, str(timestamp))
+                }
+                
+                attention_response = await client.post(
+                    f"{SERVICES['ATTENTION']['url']}/detect-face-attention",
+                    files=attention_form
+                )
+                logger.info(f"Attention service response status: {attention_response.status_code}")
+                
+                if attention_response.status_code != 200:
+                    logger.error(f"Attention service error: {attention_response.text}")
+                    raise HTTPException(status_code=502, detail=f"Attention service error: {attention_response.text}")
+                
+                attention_data = attention_response.json()
+                logger.info(f"Attention response: {attention_data}")
+            except httpx.RequestError as e:
+                logger.error(f"Attention request failed: {str(e)}")
+                raise HTTPException(status_code=503, detail=f"Attention service unavailable: {str(e)}")
+            except Exception as e:
+                logger.error(f"Attention error: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Attention processing error: {str(e)}")
             
             # Step 3: Hand Raising Detection
-            hand_raising_form = {
-                "image": (
-                    "face.jpg", 
-                    base64.b64decode(face_image), 
-                    "image/jpeg"
-                ),
-                "student_id": (None, recognition_data["person_id"]),
-                "timestamp": (None, timestamp)
-            }
-            hand_raising_response = await client.post(
-                f"{SERVICES['HANDRAISING']['url']}/detect-hand-raising",
-                files=hand_raising_form
-            )
-            if hand_raising_response.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Hand raising service error: {hand_raising_response.text}")
-            
-            hand_raising_data = hand_raising_response.json()
+                        # Step 3: Hand Raising Detection
+            try:
+                hand_raising_form = {
+                    "file": ("face.jpg", io.BytesIO(decoded_image), "image/jpeg"),  # Changed from "image" to "file"
+                    "student_id": (None, recognition_data["person_id"]),
+                    "timestamp": (None, timestamp)
+                }
+                
+                hand_raising_response = await client.post(
+                    f"{SERVICES['HANDRAISING']['url']}/detect-hand-raising",
+                    files=hand_raising_form
+                )
+                logger.info(f"Hand raising service response status: {hand_raising_response.status_code}")
+                
+                if hand_raising_response.status_code != 200:
+                    logger.error(f"Hand raising service error: {hand_raising_response.text}")
+                    raise HTTPException(status_code=502, detail=f"Hand raising service error: {hand_raising_response.text}")
+                
+                hand_raising_data = hand_raising_response.json()
+                logger.info(f"Hand raising response: {hand_raising_data}")
+            except httpx.RequestError as e:
+                logger.error(f"Hand raising request failed: {str(e)}")
+                raise HTTPException(status_code=503, detail=f"Hand raising service unavailable: {str(e)}")
+            except Exception as e:
+                logger.error(f"Hand raising error: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Hand raising processing error: {str(e)}")
             
             # Combine results
-            return {
-                "person_id": recognition_data["person_id"],
-                "recognition_status": recognition_data["status"],
-                "attention_status": attention_data["attention_status"],
-                "hand_raising_status": {
-                    "is_hand_raised": hand_raising_data["is_hand_raised"],
-                    "confidence": hand_raising_data["confidence"],
-                    "hand_position": hand_raising_data["hand_position"]
-                },
-                "confidence": attention_data["confidence"],
-                "bounding_box": bounding_box
-            }
+            try:
+                transformed_bbox = {
+                    "x": bounding_box["x_min"],
+                    "y": bounding_box["y_min"],
+                    "width": bounding_box["x_max"] - bounding_box["x_min"],
+                    "height": bounding_box["y_max"] - bounding_box["y_min"]
+                }
+            
+                result = {
+                    "person_id": recognition_data["person_id"],
+                    "recognition_status": recognition_data["status"],
+                    "attention_status": attention_data["attention_status"],
+                    "hand_raising_status": {
+                        "is_hand_raised": hand_raising_data["is_hand_raised"],
+                        "confidence": hand_raising_data["confidence"],
+                        "hand_position": hand_raising_data["hand_position"]
+                    },
+                    "confidence": attention_data["confidence"],
+                    "bounding_box": transformed_bbox  # Use the transformed bounding box
+                }
+                logger.info(f"Successfully processed face")
+                return result
+            except KeyError as e:
+                logger.error(f"Missing key in service response: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Unexpected service response format: missing key {str(e)}")
 
-    except httpx.RequestError as e:
-        logger.error(f"Request error: {str(e)}")
-        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing face: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing face: {str(e)}")
+        logger.error(f"Unexpected error processing face: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error processing face: {str(e)}")
 
 @app.post("/api/process-frame", response_model=ProcessFrameResponse)
 async def process_frame(
@@ -217,26 +266,68 @@ async def process_frame(
         
         # Step 1: Get face coordinates from Localization service
         async with httpx.AsyncClient() as client:
-            # Request face coordinates
-            coords_response = await client.post(
-                f"{SERVICES['LOCALIZATION']['url']}/localize-coords",
-                files={"image": (image.filename, image_content, image.content_type)}
+            # Send image to localization service
+            localization_response = await client.post(
+                f"{SERVICES['LOCALIZATION']['url']}/localize-image/",
+                files={"file": (image.filename, image_content, image.content_type)}
+            )
+            if localization_response.status_code != 200:
+                raise HTTPException(status_code=502, detail="Localization service error with sending image")
+
+            # Log response for debugging
+            logger.info(f"Localization response status: {localization_response.status_code}")
+            try:
+                localization_data = localization_response.json()
+                logger.info(f"Localization response data received successfully")
+            except Exception as e:
+                logger.error(f"Failed to parse localization response as JSON: {str(e)}")
+                raise HTTPException(status_code=502, detail=f"Invalid response from localization service: {str(e)}")
+
+            # Get face coordinates
+            coords_response = await client.get(
+                f"{SERVICES['LOCALIZATION']['url']}/localize-coords"
             )
             if coords_response.status_code != 200:
-                raise HTTPException(status_code=502, detail="Localization service error with coordinates")
+                raise HTTPException(status_code=502, detail="Localization service error with face coordinates")
             
-            # Request face images
-            faces_response = await client.post(
-                f"{SERVICES['LOCALIZATION']['url']}/localize-faces",
-                files={"image": (image.filename, image_content, image.content_type)}
+            # Log coordinates response for debugging
+            logger.info(f"Coordinates response status: {coords_response.status_code}")
+            try:
+                coords_data = coords_response.json()
+                logger.info(f"Coordinates data received with {len(coords_data.get('bounding_boxes', []))} boxes")
+            except Exception as e:
+                logger.error(f"Failed to parse coordinates response as JSON: {str(e)}")
+                raise HTTPException(status_code=502, detail=f"Invalid response from coordinates endpoint: {str(e)}")
+            
+            # Get extracted faces
+            faces_response = await client.get(
+                f"{SERVICES['LOCALIZATION']['url']}/localized-image"
             )
             if faces_response.status_code != 200:
                 raise HTTPException(status_code=502, detail="Localization service error with face extraction")
 
+            # Log faces response for debugging
+            logger.info(f"Faces response status: {faces_response.status_code}")
+            try:
+                faces_data = faces_response.json()
+                logger.info(f"Faces data received with {len(faces_data.get('images', []))} images")
+            except Exception as e:
+                logger.error(f"Failed to parse faces response as JSON: {str(e)}")
+                raise HTTPException(status_code=502, detail=f"Invalid response from localized-image endpoint: {str(e)}")
+
         # Parse responses
-        localized_faces = faces_response.json()["faces"]
-        face_coordinates = coords_response.json()["coordinates"]
-        
+        try:
+            localized_faces = [face["image"] for face in faces_data["images"]]
+            face_coordinates = coords_data["bounding_boxes"]
+            
+            logger.info(f"Extracted {len(localized_faces)} faces and {len(face_coordinates)} coordinates")
+        except KeyError as e:
+            logger.error(f"Missing key in response: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unexpected response format: missing key {str(e)}")
+        except Exception as e:
+            logger.error(f"Error parsing response data: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to process response data: {str(e)}")
+
         if len(localized_faces) != len(face_coordinates):
             logger.error("Mismatch between number of faces and coordinates")
             raise HTTPException(status_code=500, detail="Mismatch between detected faces and coordinates")
@@ -258,32 +349,44 @@ async def process_frame(
             processed_faces.append(result)
         
         # Step 3: Aggregate results
-        response = {
-            "lecture_id": lectureId,
-            "timestamp": timestamp,
-            "total_faces": len(processed_faces),
-            "faces": processed_faces,
-            "summary": {
-                "new_faces": len([r for r in processed_faces if r["recognition_status"] == "new"]),
-                "known_faces": len([r for r in processed_faces if r["recognition_status"] == "found"]),
-                "focused_faces": len([r for r in processed_faces if r["attention_status"] == "FOCUSED"]),
-                "unfocused_faces": len([r for r in processed_faces if r["attention_status"] == "UNFOCUSED"]),
-                "hands_raised": len([r for r in processed_faces if r["hand_raising_status"]["is_hand_raised"]])
+        try:
+            response = {
+                "lecture_id": lectureId,
+                "timestamp": timestamp,
+                "total_faces": len(processed_faces),
+                "faces": processed_faces,
+                "summary": {
+                    "new_faces": len([r for r in processed_faces if r["recognition_status"] == "new"]),
+                    "known_faces": len([r for r in processed_faces if r["recognition_status"] == "found"]),
+                    "focused_faces": len([r for r in processed_faces if r["attention_status"] == "FOCUSED"]),
+                    "unfocused_faces": len([r for r in processed_faces if r["attention_status"] == "UNFOCUSED"]),
+                    "hands_raised": len([r for r in processed_faces if r["hand_raising_status"]["is_hand_raised"]])
+                }
             }
-        }
-        
-        return response
+            return response
+        except Exception as e:
+            logger.error(f"Error aggregating results: {str(e)}")
+            raise HTTPException(
+                status_code=500, 
+                detail={
+                    "error": "Results Aggregation Error",
+                    "message": str(e),
+                    "details": "Error occurred while summarizing processed faces"
+                }
+            )
     
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Pipeline Error: {str(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        logger.error(f"Pipeline Error: {str(e)}\nTraceback: {error_traceback}")
         raise HTTPException(
             status_code=500, 
             detail={
                 "error": "Pipeline Error",
                 "message": str(e),
-                "details": "No additional details available"
+                "details": error_traceback
             }
         )
 
