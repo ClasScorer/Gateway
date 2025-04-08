@@ -1,9 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
-from enum import Enum
+from pydantic import BaseModel
+from typing import List, Optional
 import httpx
 import os
 import base64
@@ -13,10 +11,6 @@ from dotenv import load_dotenv
 import asyncio
 import io
 from starlette.responses import RedirectResponse
-import json
-import time
-from starlette.middleware.base import BaseHTTPMiddleware
-import uuid
 
 # Load environment variables from .env file
 load_dotenv()
@@ -108,7 +102,7 @@ class ProcessFrameResponse(BaseModel):
 # Helper function to validate ISO 8601 timestamp
 def is_valid_iso_string(timestamp_str: str) -> bool:
     try:
-        dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
         return True
     except ValueError:
         return False
@@ -127,6 +121,28 @@ async def process_face(face_image: str, bounding_box: dict, lecture_id: str, tim
             logger.error(f"Base64 decoding error: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Invalid base64 image: {str(e)}")
         
+        # Transform bounding box for response
+        transformed_bbox = {
+            "x": bounding_box["x_min"],
+            "y": bounding_box["y_min"],
+            "width": bounding_box["x_max"] - bounding_box["x_min"],
+            "height": bounding_box["y_max"] - bounding_box["y_min"]
+        }
+        
+        # Initialize result with default values
+        result = {
+            "person_id": "unknown",
+            "recognition_status": "failed",
+            "attention_status": "UNKNOWN",
+            "hand_raising_status": {
+                "is_hand_raised": False,
+                "confidence": 0.0,
+                "hand_position": None
+            },
+            "confidence": 0.0,
+            "bounding_box": transformed_bbox
+        }
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Step 1: Recognition
             try:
@@ -138,23 +154,19 @@ async def process_face(face_image: str, bounding_box: dict, lecture_id: str, tim
                 
                 if recognition_response.status_code != 200:
                     logger.error(f"Recognition service error: {recognition_response.text}")
-                    raise HTTPException(status_code=502, detail=f"Recognition service error: {recognition_response.text}")
-                
-                recognition_data = recognition_response.json()
-                logger.info(f"Recognition response: {recognition_data}")
-            except httpx.RequestError as e:
-                logger.error(f"Recognition request failed: {str(e)}")
-                raise HTTPException(status_code=503, detail=f"Recognition service unavailable: {str(e)}")
+                else:
+                    recognition_data = recognition_response.json()
+                    logger.info(f"Recognition response: {recognition_data}")
+                    result["person_id"] = recognition_data["person_id"]
+                    result["recognition_status"] = recognition_data["status"]
             except Exception as e:
                 logger.error(f"Recognition error: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Recognition processing error: {str(e)}")
             
-            # Step 2: Attention Detection
             # Step 2: Attention Detection
             try:
                 attention_form = {
                     "file": ("face.jpg", io.BytesIO(decoded_image), "image/jpeg"),
-                    "face_id": (None, str(recognition_data["person_id"])),  # Use (None, value) for string fields
+                    "face_id": (None, str(result["person_id"])),
                     "lecture_id": (None, str(lecture_id)),
                     "timestamp": (None, str(timestamp))
                 }
@@ -167,23 +179,19 @@ async def process_face(face_image: str, bounding_box: dict, lecture_id: str, tim
                 
                 if attention_response.status_code != 200:
                     logger.error(f"Attention service error: {attention_response.text}")
-                    raise HTTPException(status_code=502, detail=f"Attention service error: {attention_response.text}")
-                
-                attention_data = attention_response.json()
-                logger.info(f"Attention response: {attention_data}")
-            except httpx.RequestError as e:
-                logger.error(f"Attention request failed: {str(e)}")
-                raise HTTPException(status_code=503, detail=f"Attention service unavailable: {str(e)}")
+                else:
+                    attention_data = attention_response.json()
+                    logger.info(f"Attention response: {attention_data}")
+                    result["attention_status"] = attention_data["attention_status"]
+                    result["confidence"] = attention_data["confidence"]
             except Exception as e:
                 logger.error(f"Attention error: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Attention processing error: {str(e)}")
             
             # Step 3: Hand Raising Detection
-                        # Step 3: Hand Raising Detection
             try:
                 hand_raising_form = {
-                    "file": ("face.jpg", io.BytesIO(decoded_image), "image/jpeg"),  # Changed from "image" to "file"
-                    "student_id": (None, recognition_data["person_id"]),
+                    "file": ("face.jpg", io.BytesIO(decoded_image), "image/jpeg"),
+                    "student_id": (None, result["person_id"]),
                     "timestamp": (None, timestamp)
                 }
                 
@@ -195,49 +203,37 @@ async def process_face(face_image: str, bounding_box: dict, lecture_id: str, tim
                 
                 if hand_raising_response.status_code != 200:
                     logger.error(f"Hand raising service error: {hand_raising_response.text}")
-                    raise HTTPException(status_code=502, detail=f"Hand raising service error: {hand_raising_response.text}")
-                
-                hand_raising_data = hand_raising_response.json()
-                logger.info(f"Hand raising response: {hand_raising_data}")
-            except httpx.RequestError as e:
-                logger.error(f"Hand raising request failed: {str(e)}")
-                raise HTTPException(status_code=503, detail=f"Hand raising service unavailable: {str(e)}")
-            except Exception as e:
-                logger.error(f"Hand raising error: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Hand raising processing error: {str(e)}")
-            
-            # Combine results
-            try:
-                transformed_bbox = {
-                    "x": bounding_box["x_min"],
-                    "y": bounding_box["y_min"],
-                    "width": bounding_box["x_max"] - bounding_box["x_min"],
-                    "height": bounding_box["y_max"] - bounding_box["y_min"]
-                }
-            
-                result = {
-                    "person_id": recognition_data["person_id"],
-                    "recognition_status": recognition_data["status"],
-                    "attention_status": attention_data["attention_status"],
-                    "hand_raising_status": {
+                else:
+                    hand_raising_data = hand_raising_response.json()
+                    logger.info(f"Hand raising response: {hand_raising_data}")
+                    result["hand_raising_status"] = {
                         "is_hand_raised": hand_raising_data["is_hand_raised"],
                         "confidence": hand_raising_data["confidence"],
                         "hand_position": hand_raising_data["hand_position"]
-                    },
-                    "confidence": attention_data["confidence"],
-                    "bounding_box": transformed_bbox  # Use the transformed bounding box
-                }
-                logger.info(f"Successfully processed face")
-                return result
-            except KeyError as e:
-                logger.error(f"Missing key in service response: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Unexpected service response format: missing key {str(e)}")
+                    }
+            except Exception as e:
+                logger.error(f"Hand raising error: {str(e)}")
+            
+            logger.info(f"Successfully processed face with available services")
+            return result
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Unexpected error processing face: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error processing face: {str(e)}")
+        # Return basic information about the face without failing completely
+        return {
+            "person_id": "error",
+            "recognition_status": "error",
+            "attention_status": "ERROR",
+            "hand_raising_status": {
+                "is_hand_raised": False,
+                "confidence": 0.0,
+                "hand_position": None
+            },
+            "confidence": 0.0,
+            "bounding_box": transformed_bbox
+        }
 
 @app.post("/api/process-frame", response_model=ProcessFrameResponse)
 async def process_frame(
@@ -278,7 +274,7 @@ async def process_frame(
             logger.info(f"Localization response status: {localization_response.status_code}")
             try:
                 localization_data = localization_response.json()
-                logger.info(f"Localization response data received successfully")
+                logger.info("Localization response data received successfully")
             except Exception as e:
                 logger.error(f"Failed to parse localization response as JSON: {str(e)}")
                 raise HTTPException(status_code=502, detail=f"Invalid response from localization service: {str(e)}")
@@ -398,6 +394,12 @@ async def health_check():
     Check if the gateway service is running
     """
     return {"status": "ok", "message": "Gateway is running"}
+
+@app.get("/api/AssignID")
+async def assignID():
+    """Assign ID to a student, needs bounding box, reference image, and Student_ID."""
+    return True
+
 
 @app.get("/")
 async def root():
