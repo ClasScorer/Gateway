@@ -10,6 +10,9 @@ import logging
 from dotenv import load_dotenv
 import asyncio
 import io
+import cv2
+import numpy as np
+from PIL import Image
 from starlette.responses import RedirectResponse
 
 # Load environment variables from .env file
@@ -346,6 +349,13 @@ async def process_frame(
         
         # Step 3: Aggregate results
         try:
+            # Map recognition_status "found" to "known" for frontend compatibility
+            for face in processed_faces:
+                if face["recognition_status"] == "found":
+                    face["recognition_status"] = "known"
+                elif face["recognition_status"] not in ["new", "known"]:
+                    face["recognition_status"] = "unknown"
+            
             response = {
                 "lecture_id": lectureId,
                 "timestamp": timestamp,
@@ -353,7 +363,7 @@ async def process_frame(
                 "faces": processed_faces,
                 "summary": {
                     "new_faces": len([r for r in processed_faces if r["recognition_status"] == "new"]),
-                    "known_faces": len([r for r in processed_faces if r["recognition_status"] == "found"]),
+                    "known_faces": len([r for r in processed_faces if r["recognition_status"] == "known"]),
                     "focused_faces": len([r for r in processed_faces if r["attention_status"] == "FOCUSED"]),
                     "unfocused_faces": len([r for r in processed_faces if r["attention_status"] == "UNFOCUSED"]),
                     "hands_raised": len([r for r in processed_faces if r["hand_raising_status"]["is_hand_raised"]])
@@ -395,10 +405,86 @@ async def health_check():
     """
     return {"status": "ok", "message": "Gateway is running"}
 
-@app.get("/api/AssignID")
-async def assignID():
-    """Assign ID to a student, needs bounding box, reference image, and Student_ID."""
-    return True
+@app.post("/api/register-face")
+async def register_face(
+    image: UploadFile = File(...),
+    person_id: str = Form(...),
+    x: float = Form(...),
+    y: float = Form(...),
+    width: float = Form(...),
+    height: float = Form(...)
+):
+    """
+    Register a new face with a specific ID using a bounding box for cropping
+    
+    This endpoint:
+    1. Takes a full image and bounding box coordinates
+    2. Crops the image to the specified bounding box
+    3. Sends the cropped image to the Recognition service to store with the given ID
+    """
+    try:
+        # Read image content
+        image_content = await image.read()
+        
+        # Convert bytes to numpy array
+        nparr = np.frombuffer(image_content, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Get image dimensions
+        height_img, width_img = img.shape[:2]
+        
+        # Calculate bounding box coordinates
+        x_min = max(0, int(x))
+        y_min = max(0, int(y))
+        x_max = min(width_img, int(x + width))
+        y_max = min(height_img, int(y + height))
+        
+        # Crop image
+        cropped_img = img[y_min:y_max, x_min:x_max]
+        
+        # Convert back to bytes for sending
+        is_success, buffer = cv2.imencode(".jpg", cropped_img)
+        if not is_success:
+            raise HTTPException(status_code=500, detail="Failed to encode cropped image")
+        
+        cropped_bytes = io.BytesIO(buffer)
+        
+        # Send cropped image to Recognition service
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            recognition_response = await client.post(
+                f"{SERVICES['RECOGNITION']['url']}/store",
+                files={"image": ("face.jpg", cropped_bytes, "image/jpeg")},
+                data={"person_id": person_id}
+            )
+            
+            if recognition_response.status_code != 200:
+                logger.error(f"Recognition service error: {recognition_response.text}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Recognition service error: {recognition_response.text}"
+                )
+            
+            recognition_data = recognition_response.json()
+            logger.info(f"Recognition response: {recognition_data}")
+            
+            return {
+                "status": "success",
+                "message": f"Face registered successfully for ID: {person_id}",
+                "recognition_response": recognition_data
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering face: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Face Registration Error",
+                "message": str(e)
+            }
+        )
+
 
 
 @app.get("/")
