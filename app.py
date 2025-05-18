@@ -45,16 +45,16 @@ app.add_middleware(
 # Service configuration using environment variables
 SERVICES = {
     "RECOGNITION": {
-        "url": os.getenv("RECOGNITION_URL", "http://recognition:23123"),
+        "url": os.getenv("RECOGNITION_URL", "http://recognition:23121"),
     },
     "LOCALIZATION": {
-        "url": os.getenv("LOCALIZATION_URL", "http://localhost:23120"),  # Updated default URL
+        "url": os.getenv("LOCALIZATION_URL", "http://localization:23120"),  # Updated default URL
     },
     "ATTENTION": {
-        "url": os.getenv("ATTENTION_URL", "http://attention:23125"),
+        "url": os.getenv("ATTENTION_URL", "http://attention:23123"),
     },
     "HANDRAISING": {
-        "url": os.getenv("HANDRAISING_URL", "http://handraising:23124"),
+        "url": os.getenv("HANDRAISING_URL", "http://handraising:23122"),
     }
 }
 
@@ -111,7 +111,7 @@ def is_valid_iso_string(timestamp_str: str) -> bool:
         return False
 
 # Process single face with all services
-async def process_face(face_image: str, bounding_box: dict, lecture_id: str, timestamp: str) -> dict:
+async def process_face(face_image: str, bounding_box: dict, lecture_id: str, timestamp: str, img_width: int, img_height: int) -> dict:
     try:
         # Remove file writing which could cause permission issues
         logger.info(f"Processing face with bounding box: {bounding_box}")
@@ -124,12 +124,12 @@ async def process_face(face_image: str, bounding_box: dict, lecture_id: str, tim
             logger.error(f"Base64 decoding error: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Invalid base64 image: {str(e)}")
         
-        # Transform bounding box for response
+        # Normalize bounding box coordinates
         transformed_bbox = {
-            "x": bounding_box["x_min"],
-            "y": bounding_box["y_min"],
-            "width": bounding_box["x_max"] - bounding_box["x_min"],
-            "height": bounding_box["y_max"] - bounding_box["y_min"]
+            "x": bounding_box["x_min"] / img_width,
+            "y": bounding_box["y_min"] / img_height,
+            "width": (bounding_box["x_max"] - bounding_box["x_min"]) / img_width,
+            "height": (bounding_box["y_max"] - bounding_box["y_min"]) / img_height
         }
         
         # Initialize result with default values
@@ -331,9 +331,15 @@ async def process_frame(
             logger.error("Mismatch between number of faces and coordinates")
             raise HTTPException(status_code=500, detail="Mismatch between detected faces and coordinates")
 
+        # Get image dimensions for normalization
+        from PIL import Image as PILImage
+        image_stream = io.BytesIO(image_content)
+        pil_image = PILImage.open(image_stream)
+        img_width, img_height = pil_image.size
+
         # Step 2: Process each face in parallel
         face_processing_tasks = [
-            process_face(face_image, face_coordinates[idx], lectureId, timestamp)
+            process_face(face_image, face_coordinates[idx], lectureId, timestamp, img_width, img_height)
             for idx, face_image in enumerate(localized_faces)
         ]
         
